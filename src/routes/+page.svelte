@@ -3,6 +3,7 @@
 	import {
 		dndzone,
 		overrideItemIdKeyNameBeforeInitialisingDndZones,
+		SHADOW_ITEM_MARKER_PROPERTY_NAME,
 		type DndEvent
 	} from 'svelte-dnd-action';
 	import { flip } from 'svelte/animate';
@@ -10,14 +11,14 @@
 	import { WebrtcProvider } from 'y-webrtc';
 	import * as Y from 'yjs';
 
-	const SIGNAL_SERVER = 'http://localhost:4444';
+	const SIGNAL_SERVER = 'https://y-webrtc-4ou5.onrender.com';
 	const DOC_ID = 'my-document-id';
 	const ARRAY_NAME = 'my-array';
 	const MAP_NAME = 'my-map';
 
 	const flipDurationMs = 100;
 
-	type RankItem = { rank: string; team: string };
+	type RankItem = { rank: number; team: string };
 
 	let doc: Y.Doc;
 	let sharedRanks: Y.Array<RankItem>;
@@ -31,14 +32,12 @@
 	let webrtc: WebrtcProvider;
 
 	let ranksView = $state<RankItem[]>([]);
-	let teamStateView = $state<string[]>([]);
+	let teamStateView = $state(new Set());
 
-	let activeTeams = $derived(ranksView.filter((r) => !teamStateView.includes(r.team)));
-	let crossedOffTeams = $derived(ranksView.filter((r) => teamStateView.includes(r.team)));
+	let activeTeams = $derived(ranksView.filter((r) => !teamStateView.has(r.team)));
+	let crossedOffTeams = $derived(ranksView.filter((r) => teamStateView.has(r.team)));
 
 	let draggedTeams = $derived(activeTeams);
-
-	let inputs = $state({ rank: '', team: '' });
 
 	let alive = $state(!!localStorage.getItem('alive'));
 
@@ -52,12 +51,16 @@
 		sharedRanks = doc.getArray(ARRAY_NAME);
 		sharedTeamState = doc.getMap(MAP_NAME);
 
-		undoManager = new Y.UndoManager(doc);
-		canUndo = undoManager.canUndo();
-		canRedo = undoManager.canRedo();
-
 		idb = new IndexeddbPersistence(DOC_ID, doc);
 		webrtc = new WebrtcProvider(DOC_ID, doc, { signaling: [SIGNAL_SERVER] });
+
+		// Undoing/redoing moving items has issues in shared array.
+		// Only do shared crossed-off state for now.
+		// Possible fix: fractional indexing with randomized fraction offset.
+		undoManager = new Y.UndoManager(sharedTeamState);
+		undoManager.on('stack-item-added', updateCanUndo);
+		undoManager.on('stack-item-popped', updateCanUndo);
+		undoManager.on('stack-cleared', updateCanUndo);
 
 		alive = true;
 		localStorage.setItem('alive', 'true');
@@ -67,12 +70,8 @@
 		});
 
 		sharedTeamState.observe(() => {
-			teamStateView = [...sharedTeamState.keys()];
+			teamStateView = new Set([...sharedTeamState.keys()]);
 		});
-
-		undoManager.on('stack-item-added', updateCanUndo);
-		undoManager.on('stack-item-popped', updateCanUndo);
-		undoManager.on('stack-cleared', updateCanUndo);
 	}
 
 	function updateCanUndo() {
@@ -93,7 +92,25 @@
 		idb.clearData();
 	}
 
-	/*
+	function fill() {
+		const defaultRanks: RankItem[] = [
+			{ rank: 1, team: '2910' },
+			{ rank: 2, team: '1778' },
+			{ rank: 3, team: '2930' },
+			{ rank: 4, team: '9450' },
+			{ rank: 5, team: '3663' },
+			{ rank: 6, team: '2046' },
+			{ rank: 7, team: '9442' },
+			{ rank: 8, team: '1540' }
+		];
+
+		const filtered = defaultRanks.filter((r) => !ranksView.some((v) => v.team != r.team));
+
+		if (filtered.length) {
+			sharedRanks.push(filtered);
+		}
+	}
+
 	function move(team: string, by: number) {
 		const oldActualIndex = ranksView.findIndex((r) => r.team == team);
 		const oldFilteredIndex = activeTeams.findIndex((r) => r.team == team);
@@ -107,19 +124,31 @@
 			sharedRanks.insert(newActualIndex, [temp]);
 		});
 	}
-	*/
 
-	function onconsider(e: CustomEvent<DndEvent<RankItem>>) {
-		draggedTeams = e.detail.items;
+	function correctDndItems(items: RankItem[], team: string) {
+		if (items.filter((i) => i.team == team).length > 1) {
+			return items.filter(
+				(i: any) =>
+					!teamStateView.has(i.team) && (i.team !== team || i[SHADOW_ITEM_MARKER_PROPERTY_NAME])
+			);
+		}
+
+		return items.filter((i) => !teamStateView.has(i.team));
 	}
 
-	function onfinalize(e: CustomEvent<DndEvent<RankItem>>) {
-		const team = e.detail.info.id;
+	function onconsider({ detail }: CustomEvent<DndEvent<RankItem>>) {
+		draggedTeams = correctDndItems(detail.items, detail.info.id);
+	}
+
+	function onfinalize({ detail }: CustomEvent<DndEvent<RankItem>>) {
+		const team = detail.info.id;
+
+		detail.items = correctDndItems(detail.items, team);
 
 		const oldActualIndex = ranksView.findIndex((r) => r.team == team);
 		const oldFilteredIndex = activeTeams.findIndex((r) => r.team == team);
 
-		const diff = e.detail.items.findIndex((r) => r.team == team) - oldFilteredIndex;
+		const diff = detail.items.findIndex((r) => r.team == team) - oldFilteredIndex;
 
 		const newFilteredIndex = oldFilteredIndex + diff;
 		const newActualIndex = ranksView.findIndex((r) => r.team == activeTeams[newFilteredIndex].team);
@@ -132,7 +161,7 @@
 			});
 		}
 
-		activeTeams = e.detail.items;
+		activeTeams = detail.items;
 	}
 
 	function getOrdinal(n: number) {
@@ -149,20 +178,7 @@
 	<p>
 		<button onclick={stop}>stop</button>
 		<button onclick={clear}>clear and stop</button>
-	</p>
-
-	<p>
-		<input bind:value={inputs.rank} placeholder="rank" />
-		<input bind:value={inputs.team} placeholder="team" />
-
-		<button
-			onclick={() => {
-				sharedRanks.push([inputs]);
-				inputs = { rank: '', team: '' };
-			}}
-		>
-			add item
-		</button>
+		<button onclick={fill}>fill</button>
 	</p>
 
 	<p>
@@ -178,7 +194,7 @@
 			{onconsider}
 			{onfinalize}
 		>
-			{#each draggedTeams as { rank, team } (team)}
+			{#each draggedTeams as { rank, team }, index (team)}
 				<div
 					animate:flip={{ duration: flipDurationMs }}
 					style="background-color:lightgray;width:fit-content;margin-block:4px;padding:2px"
@@ -187,17 +203,14 @@
 					<input
 						type="checkbox"
 						style="width:20px;margin:4px"
-						checked={teamStateView.includes(team)}
 						onchange={() => sharedTeamState.set(team, true)}
 					/>
 					<span style="display:inline-block;width:40px">{rank}{getOrdinal(Number(rank))}</span>
 					<span style="display:inline-block;width:40px">{team}</span>
-					<!--
 					<button onclick={() => move(team, -1)} disabled={index == 0}>&uarr;</button>
 					<button onclick={() => move(team, 1)} disabled={index >= activeTeams.length - 1}>
 						&darr;
 					</button>
-					-->
 				</div>
 			{/each}
 		</div>
@@ -207,11 +220,11 @@
 		<p>Crossed off</p>
 
 		{#each crossedOffTeams as { rank, team } (team)}
-			<div style="background-color:lightgray;width:fit-content;margin-block:4px;padding:2px">
+			<div style="width:fit-content;margin-block:4px;padding:2px">
 				<input
 					type="checkbox"
 					style="width:20px;margin:4px"
-					checked={teamStateView.includes(team)}
+					checked
 					onchange={() => sharedTeamState.delete(team)}
 				/>
 				<span style="display:inline-block;width:40px;text-decoration-line:line-through">

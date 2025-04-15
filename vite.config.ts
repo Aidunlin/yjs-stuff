@@ -11,5 +11,8 @@ export default defineConfig({
 				return [];
 			}
 		}
-	]
+	],
+	server: {
+		allowedHosts: ['key-ostrich-sharp.ngrok-free.app']
+	}
 });
