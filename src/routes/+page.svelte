@@ -1,11 +1,6 @@
 <script lang="ts">
+	import { generateKeyBetween, generateNKeysBetween } from 'fractional-indexing';
 	import { onMount } from 'svelte';
-	import {
-		dndzone,
-		overrideItemIdKeyNameBeforeInitialisingDndZones,
-		SHADOW_ITEM_MARKER_PROPERTY_NAME,
-		type DndEvent
-	} from 'svelte-dnd-action';
 	import { flip } from 'svelte/animate';
 	import { IndexeddbPersistence } from 'y-indexeddb';
 	import { WebrtcProvider } from 'y-webrtc';
@@ -13,16 +8,23 @@
 
 	const SIGNAL_SERVER = 'https://y-webrtc-4ou5.onrender.com';
 	const DOC_ID = 'my-document-id';
-	const ARRAY_NAME = 'my-array';
-	const MAP_NAME = 'my-map';
+	const RANKS_NAME = 'ranks';
+	const CHECKED_NAME = 'checked';
+	const INDEXES_NAME = 'indexes';
 
 	const flipDurationMs = 100;
 
-	type RankItem = { rank: number; team: string };
+	type ListItem = {
+		team: string;
+		index: string;
+		rank: number | undefined;
+		checked: boolean;
+	};
 
 	let doc: Y.Doc;
-	let sharedRanks: Y.Array<RankItem>;
-	let sharedTeamState: Y.Map<true>;
+	let sharedTeamRanks: Y.Map<number>;
+	let sharedTeamIndexes: Y.Map<string>;
+	let sharedTeamChecks: Y.Map<true>;
 
 	let undoManager = $state<Y.UndoManager>();
 	let canUndo = $state(false);
@@ -31,33 +33,44 @@
 	let idb: IndexeddbPersistence;
 	let webrtc: WebrtcProvider;
 
-	let ranksView = $state<RankItem[]>([]);
-	let teamStateView = $state(new Set());
+	let viewTeamRanks = $state(new Map<string, number>());
+	let viewTeamIndexes = $state(new Map<string, string>());
+	let viewTeamChecks = $state(new Set<string>());
 
-	let activeTeams = $derived(ranksView.filter((r) => !teamStateView.has(r.team)));
-	let crossedOffTeams = $derived(ranksView.filter((r) => teamStateView.has(r.team)));
+	let listView = $derived.by(() => {
+		return Array.from(viewTeamIndexes)
+			.map(
+				([team, index]): ListItem => ({
+					team,
+					index,
+					rank: viewTeamRanks.get(team),
+					checked: viewTeamChecks.has(team)
+				})
+			)
+			.toSorted(sortListItems);
+	});
 
-	let draggedTeams = $derived(activeTeams);
+	let activeTeams = $derived(listView.filter((r) => !r.checked));
+	let crossedOffTeams = $derived(listView.filter((r) => r.checked));
 
 	let alive = $state(!!localStorage.getItem('alive'));
 
+	let moving = $state<{ item: ListItem; arrIndex: number } | undefined>();
+
 	onMount(() => {
-		overrideItemIdKeyNameBeforeInitialisingDndZones('team');
 		alive && start();
 	});
 
 	function start() {
 		doc = new Y.Doc();
-		sharedRanks = doc.getArray(ARRAY_NAME);
-		sharedTeamState = doc.getMap(MAP_NAME);
+		sharedTeamRanks = doc.getMap(RANKS_NAME);
+		sharedTeamChecks = doc.getMap(CHECKED_NAME);
+		sharedTeamIndexes = doc.getMap(INDEXES_NAME);
 
 		idb = new IndexeddbPersistence(DOC_ID, doc);
 		webrtc = new WebrtcProvider(DOC_ID, doc, { signaling: [SIGNAL_SERVER] });
 
-		// Undoing/redoing moving items has issues in shared array.
-		// Only do shared crossed-off state for now.
-		// Possible fix: fractional indexing with randomized fraction offset.
-		undoManager = new Y.UndoManager(sharedTeamState);
+		undoManager = new Y.UndoManager(doc);
 		undoManager.on('stack-item-added', updateCanUndo);
 		undoManager.on('stack-item-popped', updateCanUndo);
 		undoManager.on('stack-cleared', updateCanUndo);
@@ -65,12 +78,16 @@
 		alive = true;
 		localStorage.setItem('alive', 'true');
 
-		sharedRanks.observe(() => {
-			ranksView = sharedRanks.toArray();
+		sharedTeamRanks.observe(() => {
+			viewTeamRanks = new Map(sharedTeamRanks.entries());
 		});
 
-		sharedTeamState.observe(() => {
-			teamStateView = new Set([...sharedTeamState.keys()]);
+		sharedTeamChecks.observe(() => {
+			viewTeamChecks = new Set(sharedTeamChecks.keys());
+		});
+
+		sharedTeamIndexes.observe(() => {
+			viewTeamIndexes = new Map(sharedTeamIndexes.entries());
 		});
 	}
 
@@ -84,7 +101,16 @@
 		localStorage.removeItem('alive');
 
 		doc.destroy();
-		ranksView = [];
+		idb.destroy();
+		webrtc.destroy();
+		undoManager?.destroy();
+
+		canUndo = false;
+		canRedo = false;
+
+		viewTeamRanks = new Map();
+		viewTeamIndexes = new Map();
+		viewTeamChecks = new Set();
 	}
 
 	function clear() {
@@ -93,7 +119,7 @@
 	}
 
 	function fill() {
-		const defaultRanks: RankItem[] = [
+		const defaultRanks = [
 			{ rank: 1, team: '2910' },
 			{ rank: 2, team: '1778' },
 			{ rank: 3, team: '2930' },
@@ -104,64 +130,56 @@
 			{ rank: 8, team: '1540' }
 		];
 
-		const filtered = defaultRanks.filter((r) => !ranksView.some((v) => v.team != r.team));
-
-		if (filtered.length) {
-			sharedRanks.push(filtered);
-		}
-	}
-
-	function move(team: string, by: number) {
-		const oldActualIndex = ranksView.findIndex((r) => r.team == team);
-		const oldFilteredIndex = activeTeams.findIndex((r) => r.team == team);
-
-		const newFilteredIndex = oldFilteredIndex + by;
-		const newActualIndex = ranksView.findIndex((r) => r.team == activeTeams[newFilteredIndex].team);
+		const indexes = generateNKeysBetween(null, null, defaultRanks.length);
 
 		doc.transact(() => {
-			const temp = sharedRanks.get(oldActualIndex);
-			sharedRanks.delete(oldActualIndex);
-			sharedRanks.insert(newActualIndex, [temp]);
+			defaultRanks.forEach(({ rank, team }, index) => {
+				if (!viewTeamRanks.has(team)) {
+					sharedTeamRanks.set(team, rank);
+				}
+				if (!viewTeamIndexes.has(team)) {
+					sharedTeamIndexes.set(team, indexes[index]);
+				}
+			});
 		});
 	}
 
-	function correctDndItems(items: RankItem[], team: string) {
-		if (items.filter((i) => i.team == team).length > 1) {
-			return items.filter(
-				(i: any) =>
-					!teamStateView.has(i.team) && (i.team !== team || i[SHADOW_ITEM_MARKER_PROPERTY_NAME])
-			);
+	function move(toIndex: number) {
+		if (!moving) throw new Error('no moving data');
+
+		const fromIndex = moving.arrIndex;
+		const diff = toIndex - fromIndex;
+
+		if (diff == 0) {
+			throw new Error('diff is 0');
 		}
 
-		return items.filter((i) => !teamStateView.has(i.team));
-	}
+		let startArrIndex: number | undefined;
+		let endArrIndex: number | undefined;
 
-	function onconsider({ detail }: CustomEvent<DndEvent<RankItem>>) {
-		draggedTeams = correctDndItems(detail.items, detail.info.id);
-	}
+		if (diff > 0) {
+			startArrIndex = toIndex;
+			endArrIndex = toIndex + 1;
 
-	function onfinalize({ detail }: CustomEvent<DndEvent<RankItem>>) {
-		const team = detail.info.id;
+			if (startArrIndex >= activeTeams.length) startArrIndex = undefined;
+			if (endArrIndex >= activeTeams.length) endArrIndex = undefined;
+		} else {
+			startArrIndex = toIndex - 1;
+			endArrIndex = toIndex;
 
-		detail.items = correctDndItems(detail.items, team);
-
-		const oldActualIndex = ranksView.findIndex((r) => r.team == team);
-		const oldFilteredIndex = activeTeams.findIndex((r) => r.team == team);
-
-		const diff = detail.items.findIndex((r) => r.team == team) - oldFilteredIndex;
-
-		const newFilteredIndex = oldFilteredIndex + diff;
-		const newActualIndex = ranksView.findIndex((r) => r.team == activeTeams[newFilteredIndex].team);
-
-		if (newActualIndex !== oldActualIndex) {
-			doc.transact(() => {
-				const temp = sharedRanks.get(oldActualIndex);
-				sharedRanks.delete(oldActualIndex);
-				sharedRanks.insert(newActualIndex, [temp]);
-			});
+			if (startArrIndex < 0) startArrIndex = undefined;
+			if (endArrIndex < 0) endArrIndex = undefined;
 		}
 
-		activeTeams = detail.items;
+		let startIndex =
+			startArrIndex !== undefined ? $state.snapshot(activeTeams[startArrIndex]).index : undefined;
+		let endIndex =
+			endArrIndex !== undefined ? $state.snapshot(activeTeams[endArrIndex]).index : undefined;
+
+		sharedTeamIndexes.set(moving.item.team, generateKeyBetween(startIndex, endIndex));
+		moving = undefined;
+
+		console.log($state.snapshot(activeTeams).map((t) => ({ team: t.team, index: t.index })));
 	}
 
 	function getOrdinal(n: number) {
@@ -169,6 +187,12 @@
 		if (n % 10 == 2 && n % 100 != 12) return 'nd';
 		if (n % 10 == 3 && n % 100 != 13) return 'rd';
 		return 'th';
+	}
+
+	function sortListItems(a: ListItem, b: ListItem) {
+		if (a.index < b.index) return -1;
+		if (a.index > b.index) return 1;
+		return 0;
 	}
 </script>
 
@@ -186,58 +210,85 @@
 		<button onclick={() => undoManager?.redo()} disabled={!canRedo}>redo</button>
 	</p>
 
-	{#if activeTeams.length}
-		<p>Teams</p>
+	<div class="grid">
+		{#if activeTeams.length}
+			<div style="grid-column: span 4">Teams</div>
 
-		<div
-			use:dndzone={{ items: $state.snapshot(draggedTeams), flipDurationMs }}
-			{onconsider}
-			{onfinalize}
-		>
-			{#each draggedTeams as { rank, team }, index (team)}
+			{#each activeTeams as row, index (row.team)}
+				{@const thisMoving = moving?.item.team == row.team}
+				{@const bgColor = thisMoving ? 'darkgray' : 'lightgray'}
+
 				<div
 					animate:flip={{ duration: flipDurationMs }}
-					style="background-color:lightgray;width:fit-content;margin-block:4px;padding:2px"
+					class="item"
+					style="background-color:{bgColor}"
 				>
-					<span style="display:inline-block;padding-left:6px">&UpDownArrow;</span>
-					<input
-						type="checkbox"
-						style="width:20px;margin:4px"
-						onchange={() => sharedTeamState.set(team, true)}
-					/>
-					<span style="display:inline-block;width:40px">{rank}{getOrdinal(Number(rank))}</span>
-					<span style="display:inline-block;width:40px">{team}</span>
-					<button onclick={() => move(team, -1)} disabled={index == 0}>&uarr;</button>
-					<button onclick={() => move(team, 1)} disabled={index >= activeTeams.length - 1}>
-						&darr;
+					<input type="checkbox" onchange={() => sharedTeamChecks.set(row.team, true)} />
+					<div>{row.rank}{getOrdinal(Number(row.rank))}</div>
+					<div>{row.team}</div>
+					<button
+						onclick={() => {
+							if (!moving) {
+								moving = { item: row, arrIndex: index };
+							} else if (thisMoving) {
+								moving = undefined;
+							} else {
+								move(index);
+							}
+						}}
+						style="width:30px;height:24px"
+					>
+						{#if !moving}
+							{#if index == 0}
+								&DownArrow;
+							{:else if index == activeTeams.length - 1}
+								&UpArrow;
+							{:else}
+								&UpDownArrow;
+							{/if}
+						{:else if thisMoving}
+							x
+						{:else if moving.arrIndex > index}
+							&lsh;
+						{:else if moving.arrIndex < index}
+							&ldsh;
+						{/if}
 					</button>
 				</div>
 			{/each}
-		</div>
-	{/if}
+		{/if}
 
-	{#if crossedOffTeams.length}
-		<p>Crossed off</p>
+		{#if crossedOffTeams.length}
+			<div style="grid-column: span 4">Crossed off</div>
 
-		{#each crossedOffTeams as { rank, team } (team)}
-			<div style="width:fit-content;margin-block:4px;padding:2px">
-				<input
-					type="checkbox"
-					style="width:20px;margin:4px"
-					checked
-					onchange={() => sharedTeamState.delete(team)}
-				/>
-				<span style="display:inline-block;width:40px;text-decoration-line:line-through">
-					{rank}{getOrdinal(Number(rank))}
-				</span>
-				<span style="display:inline-block;width:40px;text-decoration-line:line-through">
-					{team}
-				</span>
-			</div>
-		{/each}
-	{/if}
+			{#each crossedOffTeams as { rank, team } (team)}
+				<div class="item">
+					<input type="checkbox" checked onchange={() => sharedTeamChecks.delete(team)} />
+					<div>{rank}{getOrdinal(Number(rank))}</div>
+					<div>{team}</div>
+				</div>
+			{/each}
+		{/if}
+	</div>
 {:else}
 	<p>
 		<button onclick={start}>start</button>
 	</p>
 {/if}
+
+<style>
+	.grid {
+		display: grid;
+		grid-template-columns: repeat(4, min-content);
+		align-items: center;
+		gap: 4px;
+	}
+
+	.item {
+		display: grid;
+		grid-template-columns: subgrid;
+		align-items: center;
+		grid-column: span 4;
+		padding: 2px;
+	}
+</style>
