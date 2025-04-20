@@ -22,7 +22,7 @@
 	};
 
 	let doc: Y.Doc;
-	let sharedTeamRanks: Y.Map<number>;
+	let sharedTeamDetails: Y.Map<{ rank: number }>;
 	let sharedTeamIndexes: Y.Map<string>;
 	let sharedTeamChecks: Y.Map<true>;
 
@@ -33,22 +33,28 @@
 	let idb: IndexeddbPersistence;
 	let webrtc: WebrtcProvider;
 
-	let viewTeamRanks = $state(new Map<string, number>());
+	let viewTeamDetails = $state(new Map<string, { rank: number }>());
 	let viewTeamIndexes = $state(new Map<string, string>());
 	let viewTeamChecks = $state(new Set<string>());
 
-	let listView = $derived.by(() => {
-		return Array.from(viewTeamIndexes)
+	function createListView(
+		indexes: Map<string, string>,
+		details: Map<string, { rank: number }>,
+		checks: Set<string>
+	) {
+		return Array.from(indexes)
 			.map(
 				([team, index]): ListItem => ({
 					team,
 					index,
-					rank: viewTeamRanks.get(team),
-					checked: viewTeamChecks.has(team)
+					rank: details.get(team)?.rank,
+					checked: checks.has(team)
 				})
 			)
 			.toSorted(sortListItems);
-	});
+	}
+
+	let listView = $derived(createListView(viewTeamIndexes, viewTeamDetails, viewTeamChecks));
 
 	let activeTeams = $derived(listView.filter((r) => !r.checked));
 	let crossedOffTeams = $derived(listView.filter((r) => r.checked));
@@ -63,7 +69,7 @@
 
 	function start() {
 		doc = new Y.Doc();
-		sharedTeamRanks = doc.getMap(RANKS_NAME);
+		sharedTeamDetails = doc.getMap(RANKS_NAME);
 		sharedTeamChecks = doc.getMap(CHECKED_NAME);
 		sharedTeamIndexes = doc.getMap(INDEXES_NAME);
 
@@ -78,16 +84,41 @@
 		alive = true;
 		localStorage.setItem('alive', 'true');
 
-		sharedTeamRanks.observe(() => {
-			viewTeamRanks = new Map(sharedTeamRanks.entries());
+		sharedTeamDetails.observe(() => {
+			viewTeamDetails = new Map(sharedTeamDetails.entries());
+
+			if (moving) {
+				moving.item.rank = viewTeamDetails.get(moving.item.team)?.rank ?? moving.item.rank;
+			}
 		});
 
 		sharedTeamChecks.observe(() => {
 			viewTeamChecks = new Set(sharedTeamChecks.keys());
+
+			if (moving) {
+				if (viewTeamChecks.has(moving.item.team)) {
+					moving = undefined;
+				} else {
+					activeTeams = createListView(viewTeamIndexes, viewTeamDetails, viewTeamChecks).filter(
+						(r) => !r.checked
+					);
+
+					moving.arrIndex = activeTeams.findIndex((r) => r.team == moving!.item.team);
+				}
+			}
 		});
 
 		sharedTeamIndexes.observe(() => {
 			viewTeamIndexes = new Map(sharedTeamIndexes.entries());
+
+			if (moving) {
+				activeTeams = createListView(viewTeamIndexes, viewTeamDetails, viewTeamChecks).filter(
+					(r) => !r.checked
+				);
+
+				moving.arrIndex = activeTeams.findIndex((r) => r.team == moving!.item.team);
+				moving.item.index = viewTeamIndexes.get(moving.item.team) ?? moving.item.index;
+			}
 		});
 	}
 
@@ -108,7 +139,7 @@
 		canUndo = false;
 		canRedo = false;
 
-		viewTeamRanks = new Map();
+		viewTeamDetails = new Map();
 		viewTeamIndexes = new Map();
 		viewTeamChecks = new Set();
 	}
@@ -134,8 +165,8 @@
 
 		doc.transact(() => {
 			defaultRanks.forEach(({ rank, team }, index) => {
-				if (!viewTeamRanks.has(team)) {
-					sharedTeamRanks.set(team, rank);
+				if (!viewTeamDetails.has(team)) {
+					sharedTeamDetails.set(team, { rank });
 				}
 				if (!viewTeamIndexes.has(team)) {
 					sharedTeamIndexes.set(team, indexes[index]);
@@ -178,8 +209,6 @@
 
 		sharedTeamIndexes.set(moving.item.team, generateKeyBetween(startIndex, endIndex));
 		moving = undefined;
-
-		console.log($state.snapshot(activeTeams).map((t) => ({ team: t.team, index: t.index })));
 	}
 
 	function getOrdinal(n: number) {
@@ -223,7 +252,11 @@
 					class="item"
 					style="background-color:{bgColor}"
 				>
-					<input type="checkbox" onchange={() => sharedTeamChecks.set(row.team, true)} />
+					<input
+						type="checkbox"
+						disabled={!!moving}
+						onchange={() => sharedTeamChecks.set(row.team, true)}
+					/>
 					<div>{row.rank}{getOrdinal(Number(row.rank))}</div>
 					<div>{row.team}</div>
 					<button
