@@ -37,6 +37,21 @@
 	let viewTeamIndexes = $state(new Map<string, string>());
 	let viewTeamChecks = $state(new Set<string>());
 
+	let listView = $derived(createListView(viewTeamIndexes, viewTeamDetails, viewTeamChecks));
+
+	$inspect(listView.map((r) => r.index));
+
+	let activeTeams = $derived(listView.filter((r) => !r.checked));
+	let crossedOffTeams = $derived(listView.filter((r) => r.checked));
+
+	let alive = $state(!!localStorage.getItem('alive'));
+
+	let moving = $state<{ item: ListItem; arrIndex: number } | undefined>();
+
+	onMount(() => {
+		alive && start();
+	});
+
 	function createListView(
 		indexes: Map<string, string>,
 		details: Map<string, { rank: number }>,
@@ -51,21 +66,14 @@
 					checked: checks.has(team)
 				})
 			)
-			.toSorted(sortListItems);
+			.toSorted((a, b) => {
+				if (a.index < b.index) return -1;
+				if (a.index > b.index) return 1;
+				if (a.rank && b.rank && a.rank < b.rank) return -1;
+				if (a.rank && b.rank && a.rank > b.rank) return 1;
+				return 0;
+			});
 	}
-
-	let listView = $derived(createListView(viewTeamIndexes, viewTeamDetails, viewTeamChecks));
-
-	let activeTeams = $derived(listView.filter((r) => !r.checked));
-	let crossedOffTeams = $derived(listView.filter((r) => r.checked));
-
-	let alive = $state(!!localStorage.getItem('alive'));
-
-	let moving = $state<{ item: ListItem; arrIndex: number } | undefined>();
-
-	onMount(() => {
-		alive && start();
-	});
 
 	function start() {
 		doc = new Y.Doc();
@@ -202,12 +210,43 @@
 			if (endArrIndex < 0) endArrIndex = undefined;
 		}
 
-		let startIndex =
-			startArrIndex !== undefined ? $state.snapshot(activeTeams[startArrIndex]).index : undefined;
-		let endIndex =
-			endArrIndex !== undefined ? $state.snapshot(activeTeams[endArrIndex]).index : undefined;
+		const startIndex = startArrIndex !== undefined ? activeTeams[startArrIndex].index : undefined;
+		const endIndex = endArrIndex !== undefined ? activeTeams[endArrIndex].index : undefined;
 
-		sharedTeamIndexes.set(moving.item.team, generateKeyBetween(startIndex, endIndex));
+		if (startIndex === endIndex && startArrIndex !== undefined && endArrIndex !== undefined) {
+			// To move an item between too conflicting indexes, we need to replace them with new ones.
+
+			const startTeam = activeTeams[startArrIndex];
+			const endTeam = activeTeams[endArrIndex];
+
+			const beforeArrIndex = startArrIndex == 0 ? undefined : startArrIndex - 1;
+			const afteArrIndex = endArrIndex == activeTeams.length - 1 ? undefined : endArrIndex + 1;
+
+			const beforeIndex =
+				beforeArrIndex !== undefined ? activeTeams[beforeArrIndex].index : undefined;
+			const afterIndex = afteArrIndex !== undefined ? activeTeams[afteArrIndex].index : undefined;
+
+			if (beforeIndex === afterIndex) {
+				alert('Something went terribly wrong!');
+				moving = undefined;
+				return;
+			}
+
+			const [newStartIndex, newIndex, newEndIndex] = generateNKeysBetween(
+				beforeIndex,
+				afterIndex,
+				3
+			);
+
+			doc.transact(() => {
+				sharedTeamIndexes.set(startTeam.team, newStartIndex);
+				sharedTeamIndexes.set(moving!.item.team, newIndex);
+				sharedTeamIndexes.set(endTeam.team, newEndIndex);
+			});
+		} else {
+			sharedTeamIndexes.set(moving.item.team, generateKeyBetween(startIndex, endIndex));
+		}
+
 		moving = undefined;
 	}
 
@@ -216,12 +255,6 @@
 		if (n % 10 == 2 && n % 100 != 12) return 'nd';
 		if (n % 10 == 3 && n % 100 != 13) return 'rd';
 		return 'th';
-	}
-
-	function sortListItems(a: ListItem, b: ListItem) {
-		if (a.index < b.index) return -1;
-		if (a.index > b.index) return 1;
-		return 0;
 	}
 </script>
 
