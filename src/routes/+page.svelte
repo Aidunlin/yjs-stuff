@@ -1,5 +1,8 @@
 <script lang="ts">
-	import { generateKeyBetween, generateNKeysBetween } from 'fractional-indexing';
+	import {
+		generateJitteredKeyBetween,
+		generateNJitteredKeysBetween
+	} from 'fractional-indexing-jittered';
 	import { onMount } from 'svelte';
 	import { flip } from 'svelte/animate';
 	import { IndexeddbPersistence } from 'y-indexeddb';
@@ -169,7 +172,7 @@
 			{ rank: 8, team: '1540' }
 		];
 
-		const indexes = generateNKeysBetween(null, null, defaultRanks.length);
+		const indexes = generateNJitteredKeysBetween(null, null, defaultRanks.length);
 
 		doc.transact(() => {
 			defaultRanks.forEach(({ rank, team }, index) => {
@@ -210,8 +213,8 @@
 			if (endArrIndex < 0) endArrIndex = undefined;
 		}
 
-		const startIndex = startArrIndex !== undefined ? activeTeams[startArrIndex].index : undefined;
-		const endIndex = endArrIndex !== undefined ? activeTeams[endArrIndex].index : undefined;
+		const startIndex = startArrIndex !== undefined ? activeTeams[startArrIndex].index : null;
+		const endIndex = endArrIndex !== undefined ? activeTeams[endArrIndex].index : null;
 
 		if (startIndex === endIndex && startArrIndex !== undefined && endArrIndex !== undefined) {
 			// To move an item between too conflicting indexes, we need to replace them with new ones.
@@ -222,9 +225,8 @@
 			const beforeArrIndex = startArrIndex == 0 ? undefined : startArrIndex - 1;
 			const afteArrIndex = endArrIndex == activeTeams.length - 1 ? undefined : endArrIndex + 1;
 
-			const beforeIndex =
-				beforeArrIndex !== undefined ? activeTeams[beforeArrIndex].index : undefined;
-			const afterIndex = afteArrIndex !== undefined ? activeTeams[afteArrIndex].index : undefined;
+			const beforeIndex = beforeArrIndex !== undefined ? activeTeams[beforeArrIndex].index : null;
+			const afterIndex = afteArrIndex !== undefined ? activeTeams[afteArrIndex].index : null;
 
 			if (beforeIndex === afterIndex) {
 				alert('Something went terribly wrong!');
@@ -232,7 +234,7 @@
 				return;
 			}
 
-			const [newStartIndex, newIndex, newEndIndex] = generateNKeysBetween(
+			const [newStartIndex, newIndex, newEndIndex] = generateNJitteredKeysBetween(
 				beforeIndex,
 				afterIndex,
 				3
@@ -244,7 +246,7 @@
 				sharedTeamIndexes.set(endTeam.team, newEndIndex);
 			});
 		} else {
-			sharedTeamIndexes.set(moving.item.team, generateKeyBetween(startIndex, endIndex));
+			sharedTeamIndexes.set(moving.item.team, generateJitteredKeyBetween(startIndex, endIndex));
 		}
 
 		moving = undefined;
