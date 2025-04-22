@@ -10,7 +10,6 @@
 	import * as Y from 'yjs';
 
 	const SIGNAL_SERVER = 'https://y-webrtc-4ou5.onrender.com';
-	const DOC_ID = 'my-document-id';
 	const RANKS_NAME = 'ranks';
 	const CHECKED_NAME = 'checked';
 	const INDEXES_NAME = 'indexes';
@@ -40,7 +39,7 @@
 	let viewTeamIndexes = $state(new Map<string, string>());
 	let viewTeamChecks = $state(new Set<string>());
 
-	let listView = $derived(createListView(viewTeamIndexes, viewTeamDetails, viewTeamChecks));
+	let listView = $derived(createListView());
 
 	$inspect(listView.map((r) => r.index));
 
@@ -49,24 +48,24 @@
 
 	let alive = $state(!!localStorage.getItem('alive'));
 
-	let moving = $state<{ item: ListItem; arrIndex: number } | undefined>();
+	let userName = $state(localStorage.getItem('username') ?? '');
+	let docName = $state(localStorage.getItem('docname') ?? '');
+	let signalingServerPassword = $state(localStorage.getItem('password') ?? '');
+
+	let moving = $state<{ team: string; index: string } | undefined>();
 
 	onMount(() => {
 		alive && start();
 	});
 
-	function createListView(
-		indexes: Map<string, string>,
-		details: Map<string, { rank: number }>,
-		checks: Set<string>
-	) {
-		return Array.from(indexes)
+	function createListView() {
+		return Array.from(viewTeamIndexes)
 			.map(
 				([team, index]): ListItem => ({
 					team,
 					index,
-					rank: details.get(team)?.rank,
-					checked: checks.has(team)
+					rank: viewTeamDetails.get(team)?.rank,
+					checked: viewTeamChecks.has(team)
 				})
 			)
 			.toSorted((a, b) => {
@@ -79,13 +78,22 @@
 	}
 
 	function start() {
+		if (!docName) {
+			return;
+		}
+
+		localStorage.setItem('docname', docName);
+
 		doc = new Y.Doc();
 		sharedTeamDetails = doc.getMap(RANKS_NAME);
 		sharedTeamChecks = doc.getMap(CHECKED_NAME);
 		sharedTeamIndexes = doc.getMap(INDEXES_NAME);
 
-		idb = new IndexeddbPersistence(DOC_ID, doc);
-		webrtc = new WebrtcProvider(DOC_ID, doc, { signaling: [SIGNAL_SERVER] });
+		idb = new IndexeddbPersistence(docName, doc);
+		webrtc = new WebrtcProvider(docName, doc, {
+			signaling: [SIGNAL_SERVER],
+			password: signalingServerPassword || undefined
+		});
 
 		undoManager = new Y.UndoManager(doc);
 		undoManager.on('stack-item-added', updateCanUndo);
@@ -94,28 +102,22 @@
 
 		alive = true;
 		localStorage.setItem('alive', 'true');
+		signalingServerPassword && localStorage.setItem('password', signalingServerPassword);
+
+		if (userName) {
+			localStorage.setItem('username', userName);
+			webrtc.awareness.setLocalStateField('user', userName);
+		}
 
 		sharedTeamDetails.observe(() => {
 			viewTeamDetails = new Map(sharedTeamDetails.entries());
-
-			if (moving) {
-				moving.item.rank = viewTeamDetails.get(moving.item.team)?.rank ?? moving.item.rank;
-			}
 		});
 
 		sharedTeamChecks.observe(() => {
 			viewTeamChecks = new Set(sharedTeamChecks.keys());
 
-			if (moving) {
-				if (viewTeamChecks.has(moving.item.team)) {
-					moving = undefined;
-				} else {
-					activeTeams = createListView(viewTeamIndexes, viewTeamDetails, viewTeamChecks).filter(
-						(r) => !r.checked
-					);
-
-					moving.arrIndex = activeTeams.findIndex((r) => r.team == moving!.item.team);
-				}
+			if (moving && viewTeamChecks.has(moving.team)) {
+				moving = undefined;
 			}
 		});
 
@@ -123,12 +125,7 @@
 			viewTeamIndexes = new Map(sharedTeamIndexes.entries());
 
 			if (moving) {
-				activeTeams = createListView(viewTeamIndexes, viewTeamDetails, viewTeamChecks).filter(
-					(r) => !r.checked
-				);
-
-				moving.arrIndex = activeTeams.findIndex((r) => r.team == moving!.item.team);
-				moving.item.index = viewTeamIndexes.get(moving.item.team) ?? moving.item.index;
+				moving.index = viewTeamIndexes.get(moving.team) ?? moving.index;
 			}
 		});
 	}
@@ -189,11 +186,13 @@
 	function move(toIndex: number) {
 		if (!moving) throw new Error('no moving data');
 
-		const fromIndex = moving.arrIndex;
+		const fromIndex = activeTeams.findIndex((r) => r.team == moving!.team);
 		const diff = toIndex - fromIndex;
 
-		if (diff == 0) {
-			throw new Error('diff is 0');
+		if (fromIndex === -1 || diff == 0) {
+			alert('Something went terribly wrong!');
+			moving = undefined;
+			return;
 		}
 
 		let startArrIndex: number | undefined;
@@ -242,11 +241,11 @@
 
 			doc.transact(() => {
 				sharedTeamIndexes.set(startTeam.team, newStartIndex);
-				sharedTeamIndexes.set(moving!.item.team, newIndex);
+				sharedTeamIndexes.set(moving!.team, newIndex);
 				sharedTeamIndexes.set(endTeam.team, newEndIndex);
 			});
 		} else {
-			sharedTeamIndexes.set(moving.item.team, generateJitteredKeyBetween(startIndex, endIndex));
+			sharedTeamIndexes.set(moving.team, generateJitteredKeyBetween(startIndex, endIndex));
 		}
 
 		moving = undefined;
@@ -260,9 +259,11 @@
 	}
 </script>
 
-<h1>yjs-stuff</h1>
-
 {#if alive}
+	<h1>
+		{userName} | {docName} | {signalingServerPassword}
+	</h1>
+
 	<p>
 		<button onclick={stop}>stop</button>
 		<button onclick={clear}>clear and stop</button>
@@ -279,7 +280,7 @@
 			<div style="grid-column: span 4">Teams</div>
 
 			{#each activeTeams as row, index (row.team)}
-				{@const thisMoving = moving?.item.team == row.team}
+				{@const thisMoving = moving?.team == row.team}
 				{@const bgColor = thisMoving ? 'darkgray' : 'lightgray'}
 
 				<div
@@ -297,7 +298,7 @@
 					<button
 						onclick={() => {
 							if (!moving) {
-								moving = { item: row, arrIndex: index };
+								moving = { team: row.team, index: row.index };
 							} else if (thisMoving) {
 								moving = undefined;
 							} else {
@@ -316,9 +317,9 @@
 							{/if}
 						{:else if thisMoving}
 							x
-						{:else if moving.arrIndex > index}
+						{:else if moving.index > row.index}
 							&lsh;
-						{:else if moving.arrIndex < index}
+						{:else if moving.index < row.index}
 							&ldsh;
 						{/if}
 					</button>
@@ -339,6 +340,26 @@
 		{/if}
 	</div>
 {:else}
+	<h1>yjs-stuff</h1>
+
+	<p>
+		<label>
+			user name<br />
+			<input bind:value={userName} />
+		</label>
+	</p>
+	<p>
+		<label>
+			doc name<br />
+			<input bind:value={docName} />
+		</label>
+	</p>
+	<p>
+		<label>
+			lobby code<br />
+			<input bind:value={signalingServerPassword} />
+		</label>
+	</p>
 	<p>
 		<button onclick={start}>start</button>
 	</p>
