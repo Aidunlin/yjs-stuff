@@ -40,8 +40,6 @@
 
 	let listView = $derived(createListView());
 
-	$inspect(listView.map((r) => r.index));
-
 	let activeTeams = $derived(listView.filter((r) => !r.checked));
 	let crossedOffTeams = $derived(listView.filter((r) => r.checked));
 
@@ -51,7 +49,7 @@
 	let docName = $state(localStorage.getItem('docname') ?? '');
 	let signalingServerPassword = $state(localStorage.getItem('password') ?? '');
 
-	let moving = $state<{ team: string; index: string } | undefined>();
+	let movingTeam = $state<string | undefined>();
 
 	onMount(() => {
 		alive && start();
@@ -97,7 +95,6 @@
 		undoManager = new Y.UndoManager(doc);
 		undoManager.on('stack-item-added', updateCanUndo);
 		undoManager.on('stack-item-popped', updateCanUndo);
-		undoManager.on('stack-cleared', updateCanUndo);
 
 		alive = true;
 		localStorage.setItem('alive', 'true');
@@ -115,18 +112,14 @@
 		sharedTeamChecks.observe(() => {
 			viewTeamChecks = new Set(sharedTeamChecks.keys());
 
-			if (moving && viewTeamChecks.has(moving.team)) {
-				moving = undefined;
+			if (movingTeam && viewTeamChecks.has(movingTeam)) {
+				movingTeam = undefined;
 			}
 		});
 
 		sharedTeamIndexes.observe(() => {
 			viewTeamIndexes = new Map(sharedTeamIndexes.entries());
 			indexGen.updateList(Array.from(viewTeamIndexes.values()));
-
-			if (moving) {
-				moving.index = viewTeamIndexes.get(moving.team) ?? moving.index;
-			}
 		});
 	}
 
@@ -178,31 +171,74 @@
 			sharedTeamIndexes.clear();
 			sharedTeamChecks.clear();
 
-			defaultRanks.forEach(({ rank, team }, index) => {
+			defaultRanks.forEach(({ team, rank }, i) => {
 				sharedTeamDetails.set(team, { rank });
-				sharedTeamIndexes.set(team, indexes[index]);
+				sharedTeamIndexes.set(team, indexes[i]);
 			});
 		});
 	}
 
-	function move(toArrIndex: number, toIndex: string) {
-		if (!moving) {
-			alert('no moving data');
+	function move(toTeam: string) {
+		removeAnyDuplicates();
+
+		if (!movingTeam) {
+			console.error('no moving data');
 			return;
 		}
 
-		const fromArrIndex = activeTeams.findIndex((r) => r.team == moving!.team);
-		const arrIndexDiff = toArrIndex - fromArrIndex;
+		const toArrIndex = activeTeams.findIndex((r) => r.team == toTeam);
+		const toIndex = activeTeams.find((r) => r.team == toTeam)?.index;
 
-		if (fromArrIndex === -1 || arrIndexDiff == 0) {
-			alert('could not calculate usable diff');
-		} else if (arrIndexDiff > 0) {
-			sharedTeamIndexes.set(moving.team, indexGen.keyAfter(toIndex));
-		} else {
-			sharedTeamIndexes.set(moving.team, indexGen.keyBefore(toIndex));
+		if (!toIndex) {
+			console.error(`could not find index to move ${movingTeam} to ${toTeam}`);
+			movingTeam = undefined;
+			return;
 		}
 
-		moving = undefined;
+		const fromArrIndex = activeTeams.findIndex((r) => r.team == movingTeam);
+		const arrIndexDiff = toArrIndex - fromArrIndex;
+
+		if (!arrIndexDiff) {
+			console.error(`no diff between ${movingTeam} and ${toTeam}`);
+			movingTeam = undefined;
+			return;
+		}
+
+		if (arrIndexDiff > 0) {
+			sharedTeamIndexes.set(movingTeam, indexGen.keyAfter(toIndex));
+		} else {
+			sharedTeamIndexes.set(movingTeam, indexGen.keyBefore(toIndex));
+		}
+
+		movingTeam = undefined;
+	}
+
+	function removeAnyDuplicates() {
+		let duplicates = false;
+
+		const set = new Set<string>();
+		for (const index of listView.map((r) => r.index)) {
+			if (set.has(index)) {
+				duplicates = true;
+				break;
+			}
+
+			set.add(index);
+		}
+
+		if (!duplicates) {
+			return;
+		}
+
+		console.warn('duplicate indexes found, regenerating all indexes while keeping same order');
+
+		const indexes = generateNJitteredKeysBetween(null, null, listView.length);
+
+		doc.transact(() => {
+			listView.forEach(({ team }, i) => {
+				sharedTeamIndexes.set(team, indexes[i]);
+			});
+		});
 	}
 
 	function getOrdinal(n: number) {
@@ -231,10 +267,12 @@
 
 	<div class="grid">
 		{#if activeTeams.length}
+			{@const movingIndex = activeTeams.find((r) => r.team == movingTeam)?.index}
+
 			<div style="grid-column: span 5">Teams</div>
 
 			{#each activeTeams as row, arrIndex (row.team)}
-				{@const thisMoving = moving?.team == row.team}
+				{@const thisMoving = movingTeam == row.team}
 				{@const bgColor = thisMoving ? 'darkgray' : 'lightgray'}
 
 				<div
@@ -244,24 +282,24 @@
 				>
 					<input
 						type="checkbox"
-						disabled={!!moving}
+						disabled={!!movingTeam}
 						onchange={() => sharedTeamChecks.set(row.team, true)}
 					/>
 					<div>{row.rank}{getOrdinal(row.rank)}</div>
 					<div>{row.team}</div>
 					<button
 						onclick={() => {
-							if (!moving) {
-								moving = { team: row.team, index: row.index };
+							if (!movingTeam) {
+								movingTeam = row.team;
 							} else if (thisMoving) {
-								moving = undefined;
+								movingTeam = undefined;
 							} else {
-								move(arrIndex, row.index);
+								move(row.team);
 							}
 						}}
 						style="width:30px;height:24px"
 					>
-						{#if !moving}
+						{#if !movingTeam}
 							{#if arrIndex == 0}
 								&DownArrow;
 							{:else if arrIndex == activeTeams.length - 1}
@@ -271,9 +309,9 @@
 							{/if}
 						{:else if thisMoving}
 							x
-						{:else if moving.index > row.index}
+						{:else if movingIndex && movingIndex > row.index}
 							&lsh;
-						{:else if moving.index < row.index}
+						{:else if movingIndex && movingIndex < row.index}
 							&ldsh;
 						{/if}
 					</button>
@@ -291,7 +329,7 @@
 					<div>{rank}{getOrdinal(rank)}</div>
 					<div>{team}</div>
 					<div></div>
-					<div>{index}</div>
+					<div style="font-family:monospace">{index}</div>
 				</div>
 			{/each}
 		{/if}
