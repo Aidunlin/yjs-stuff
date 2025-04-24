@@ -22,6 +22,11 @@
 		checked: boolean;
 	};
 
+	type User = {
+		name?: string | undefined;
+		movingTeam?: string | undefined;
+	};
+
 	let doc: Y.Doc;
 	let sharedTeamDetails: Y.Map<{ rank: number }>;
 	let sharedTeamIndexes: Y.Map<string>;
@@ -50,6 +55,8 @@
 	let signalingServerPassword = $state(localStorage.getItem('password') ?? '');
 
 	let movingTeam = $state<string | undefined>();
+
+	let people: User[] = $state([]);
 
 	onMount(() => {
 		alive && start();
@@ -92,6 +99,11 @@
 			password: signalingServerPassword || undefined
 		});
 
+		webrtc.awareness.on('change', () => {
+			people = Array.from(webrtc.awareness.getStates().values()) as User[];
+			console.log(webrtc.awareness.getStates());
+		});
+
 		undoManager = new Y.UndoManager(doc);
 		undoManager.on('stack-item-added', updateCanUndo);
 		undoManager.on('stack-item-popped', updateCanUndo);
@@ -102,7 +114,7 @@
 
 		if (userName) {
 			localStorage.setItem('username', userName);
-			webrtc.awareness.setLocalStateField('user', userName);
+			webrtc.awareness.setLocalState({ name: userName });
 		}
 
 		sharedTeamDetails.observe(() => {
@@ -114,6 +126,7 @@
 
 			if (movingTeam && viewTeamChecks.has(movingTeam)) {
 				movingTeam = undefined;
+				webrtc.awareness.setLocalStateField('movingTeam', movingTeam);
 			}
 		});
 
@@ -254,6 +267,8 @@
 		{userName} | {docName} | {signalingServerPassword}
 	</h1>
 
+	<p>people: {people.map((u) => u.name).join(', ')}</p>
+
 	<p>
 		<button onclick={stop}>stop</button>
 		<button onclick={clear}>clear and stop</button>
@@ -273,12 +288,14 @@
 
 			{#each activeTeams as row, arrIndex (row.team)}
 				{@const thisMoving = movingTeam == row.team}
+				{@const otherMovingThis = people.some((u) => u.movingTeam == row.team)}
 				{@const bgColor = thisMoving ? 'darkgray' : 'lightgray'}
+				{@const color = otherMovingThis ? 'blue' : 'black'}
 
 				<div
 					animate:flip={{ duration: flipDurationMs }}
 					class="item"
-					style="background-color:{bgColor}"
+					style="background-color:{bgColor};color:{color}"
 				>
 					<input
 						type="checkbox"
@@ -296,6 +313,7 @@
 							} else {
 								move(row.team);
 							}
+							webrtc.awareness.setLocalStateField('movingTeam', movingTeam);
 						}}
 						style="width:30px;height:24px"
 					>
@@ -340,7 +358,7 @@
 	<p>
 		<label>
 			user name<br />
-			<input bind:value={userName} />
+			<input bind:value={userName} onchange={() => localStorage.setItem('username', userName)} />
 		</label>
 	</p>
 	<p>
