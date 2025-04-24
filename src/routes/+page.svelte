@@ -1,8 +1,5 @@
 <script lang="ts">
-	import {
-		generateJitteredKeyBetween,
-		generateNJitteredKeysBetween
-	} from 'fractional-indexing-jittered';
+	import { generateNJitteredKeysBetween, IndexGenerator } from 'fractional-indexing-jittered';
 	import { onMount } from 'svelte';
 	import { flip } from 'svelte/animate';
 	import { IndexeddbPersistence } from 'y-indexeddb';
@@ -10,16 +7,18 @@
 	import * as Y from 'yjs';
 
 	const SIGNAL_SERVER = 'https://y-webrtc-4ou5.onrender.com';
-	const RANKS_NAME = 'ranks';
+	const DETAILS_NAME = 'details';
 	const CHECKED_NAME = 'checked';
 	const INDEXES_NAME = 'indexes';
 
 	const flipDurationMs = 100;
 
+	const indexGen = new IndexGenerator([]);
+
 	type ListItem = {
 		team: string;
 		index: string;
-		rank: number | undefined;
+		rank: number;
 		checked: boolean;
 	};
 
@@ -64,15 +63,15 @@
 				([team, index]): ListItem => ({
 					team,
 					index,
-					rank: viewTeamDetails.get(team)?.rank,
+					rank: viewTeamDetails.get(team)?.rank ?? 0,
 					checked: viewTeamChecks.has(team)
 				})
 			)
 			.toSorted((a, b) => {
 				if (a.index < b.index) return -1;
 				if (a.index > b.index) return 1;
-				if (a.rank && b.rank && a.rank < b.rank) return -1;
-				if (a.rank && b.rank && a.rank > b.rank) return 1;
+				if (a.rank < b.rank) return -1;
+				if (a.rank > b.rank) return 1;
 				return 0;
 			});
 	}
@@ -85,7 +84,7 @@
 		localStorage.setItem('docname', docName);
 
 		doc = new Y.Doc();
-		sharedTeamDetails = doc.getMap(RANKS_NAME);
+		sharedTeamDetails = doc.getMap(DETAILS_NAME);
 		sharedTeamChecks = doc.getMap(CHECKED_NAME);
 		sharedTeamIndexes = doc.getMap(INDEXES_NAME);
 
@@ -123,6 +122,7 @@
 
 		sharedTeamIndexes.observe(() => {
 			viewTeamIndexes = new Map(sharedTeamIndexes.entries());
+			indexGen.updateList(Array.from(viewTeamIndexes.values()));
 
 			if (moving) {
 				moving.index = viewTeamIndexes.get(moving.team) ?? moving.index;
@@ -138,6 +138,8 @@
 	function stop() {
 		alive = false;
 		localStorage.removeItem('alive');
+
+		indexGen.updateList([]);
 
 		doc.destroy();
 		idb.destroy();
@@ -172,80 +174,32 @@
 		const indexes = generateNJitteredKeysBetween(null, null, defaultRanks.length);
 
 		doc.transact(() => {
+			sharedTeamDetails.clear();
+			sharedTeamIndexes.clear();
+			sharedTeamChecks.clear();
+
 			defaultRanks.forEach(({ rank, team }, index) => {
-				if (!viewTeamDetails.has(team)) {
-					sharedTeamDetails.set(team, { rank });
-				}
-				if (!viewTeamIndexes.has(team)) {
-					sharedTeamIndexes.set(team, indexes[index]);
-				}
+				sharedTeamDetails.set(team, { rank });
+				sharedTeamIndexes.set(team, indexes[index]);
 			});
 		});
 	}
 
-	function move(toIndex: number) {
-		if (!moving) throw new Error('no moving data');
-
-		const fromIndex = activeTeams.findIndex((r) => r.team == moving!.team);
-		const diff = toIndex - fromIndex;
-
-		if (fromIndex === -1 || diff == 0) {
-			alert('Something went terribly wrong!');
-			moving = undefined;
+	function move(toArrIndex: number, toIndex: string) {
+		if (!moving) {
+			alert('no moving data');
 			return;
 		}
 
-		let startArrIndex: number | undefined;
-		let endArrIndex: number | undefined;
+		const fromArrIndex = activeTeams.findIndex((r) => r.team == moving!.team);
+		const arrIndexDiff = toArrIndex - fromArrIndex;
 
-		if (diff > 0) {
-			startArrIndex = toIndex;
-			endArrIndex = toIndex + 1;
-
-			if (startArrIndex >= activeTeams.length) startArrIndex = undefined;
-			if (endArrIndex >= activeTeams.length) endArrIndex = undefined;
+		if (fromArrIndex === -1 || arrIndexDiff == 0) {
+			alert('could not calculate usable diff');
+		} else if (arrIndexDiff > 0) {
+			sharedTeamIndexes.set(moving.team, indexGen.keyAfter(toIndex));
 		} else {
-			startArrIndex = toIndex - 1;
-			endArrIndex = toIndex;
-
-			if (startArrIndex < 0) startArrIndex = undefined;
-			if (endArrIndex < 0) endArrIndex = undefined;
-		}
-
-		const startIndex = startArrIndex !== undefined ? activeTeams[startArrIndex].index : null;
-		const endIndex = endArrIndex !== undefined ? activeTeams[endArrIndex].index : null;
-
-		if (startIndex === endIndex && startArrIndex !== undefined && endArrIndex !== undefined) {
-			// To move an item between too conflicting indexes, we need to replace them with new ones.
-
-			const startTeam = activeTeams[startArrIndex];
-			const endTeam = activeTeams[endArrIndex];
-
-			const beforeArrIndex = startArrIndex == 0 ? undefined : startArrIndex - 1;
-			const afteArrIndex = endArrIndex == activeTeams.length - 1 ? undefined : endArrIndex + 1;
-
-			const beforeIndex = beforeArrIndex !== undefined ? activeTeams[beforeArrIndex].index : null;
-			const afterIndex = afteArrIndex !== undefined ? activeTeams[afteArrIndex].index : null;
-
-			if (beforeIndex === afterIndex) {
-				alert('Something went terribly wrong!');
-				moving = undefined;
-				return;
-			}
-
-			const [newStartIndex, newIndex, newEndIndex] = generateNJitteredKeysBetween(
-				beforeIndex,
-				afterIndex,
-				3
-			);
-
-			doc.transact(() => {
-				sharedTeamIndexes.set(startTeam.team, newStartIndex);
-				sharedTeamIndexes.set(moving!.team, newIndex);
-				sharedTeamIndexes.set(endTeam.team, newEndIndex);
-			});
-		} else {
-			sharedTeamIndexes.set(moving.team, generateJitteredKeyBetween(startIndex, endIndex));
+			sharedTeamIndexes.set(moving.team, indexGen.keyBefore(toIndex));
 		}
 
 		moving = undefined;
@@ -267,7 +221,7 @@
 	<p>
 		<button onclick={stop}>stop</button>
 		<button onclick={clear}>clear and stop</button>
-		<button onclick={fill}>fill</button>
+		<button onclick={fill}>reset data</button>
 	</p>
 
 	<p>
@@ -277,9 +231,9 @@
 
 	<div class="grid">
 		{#if activeTeams.length}
-			<div style="grid-column: span 4">Teams</div>
+			<div style="grid-column: span 5">Teams</div>
 
-			{#each activeTeams as row, index (row.team)}
+			{#each activeTeams as row, arrIndex (row.team)}
 				{@const thisMoving = moving?.team == row.team}
 				{@const bgColor = thisMoving ? 'darkgray' : 'lightgray'}
 
@@ -293,7 +247,7 @@
 						disabled={!!moving}
 						onchange={() => sharedTeamChecks.set(row.team, true)}
 					/>
-					<div>{row.rank}{getOrdinal(Number(row.rank))}</div>
+					<div>{row.rank}{getOrdinal(row.rank)}</div>
 					<div>{row.team}</div>
 					<button
 						onclick={() => {
@@ -302,15 +256,15 @@
 							} else if (thisMoving) {
 								moving = undefined;
 							} else {
-								move(index);
+								move(arrIndex, row.index);
 							}
 						}}
 						style="width:30px;height:24px"
 					>
 						{#if !moving}
-							{#if index == 0}
+							{#if arrIndex == 0}
 								&DownArrow;
-							{:else if index == activeTeams.length - 1}
+							{:else if arrIndex == activeTeams.length - 1}
 								&UpArrow;
 							{:else}
 								&UpDownArrow;
@@ -323,18 +277,21 @@
 							&ldsh;
 						{/if}
 					</button>
+					<div style="font-family:monospace">{row.index}</div>
 				</div>
 			{/each}
 		{/if}
 
 		{#if crossedOffTeams.length}
-			<div style="grid-column: span 4">Crossed off</div>
+			<div style="grid-column: span 5">Crossed off</div>
 
-			{#each crossedOffTeams as { rank, team } (team)}
+			{#each crossedOffTeams as { rank, team, index } (team)}
 				<div class="item">
 					<input type="checkbox" checked onchange={() => sharedTeamChecks.delete(team)} />
-					<div>{rank}{getOrdinal(Number(rank))}</div>
+					<div>{rank}{getOrdinal(rank)}</div>
 					<div>{team}</div>
+					<div></div>
+					<div>{index}</div>
 				</div>
 			{/each}
 		{/if}
@@ -368,7 +325,7 @@
 <style>
 	.grid {
 		display: grid;
-		grid-template-columns: repeat(4, min-content);
+		grid-template-columns: repeat(5, min-content);
 		align-items: center;
 		gap: 4px;
 	}
@@ -377,7 +334,7 @@
 		display: grid;
 		grid-template-columns: subgrid;
 		align-items: center;
-		grid-column: span 4;
+		grid-column: span 5;
 		padding: 2px;
 	}
 </style>
