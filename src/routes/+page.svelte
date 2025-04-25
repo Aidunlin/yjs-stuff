@@ -2,6 +2,7 @@
 	import { generateNJitteredKeysBetween, IndexGenerator } from 'fractional-indexing-jittered';
 	import { onMount } from 'svelte';
 	import { flip } from 'svelte/animate';
+	import { SvelteMap } from 'svelte/reactivity';
 	import { IndexeddbPersistence } from 'y-indexeddb';
 	import { WebrtcProvider } from 'y-webrtc';
 	import * as Y from 'yjs';
@@ -37,7 +38,7 @@
 	let canRedo = $state(false);
 
 	let idb: IndexeddbPersistence;
-	let webrtc: WebrtcProvider;
+	let webrtc = $state<WebrtcProvider | undefined>();
 
 	let viewTeamDetails = $state(new Map<string, { rank: number }>());
 	let viewTeamIndexes = $state(new Map<string, string>());
@@ -56,7 +57,7 @@
 
 	let movingTeam = $state<string | undefined>();
 
-	let people: User[] = $state([]);
+	let people = $state(new SvelteMap<number, User>());
 
 	onMount(() => {
 		alive && start();
@@ -82,6 +83,10 @@
 	}
 
 	function start() {
+		docName = docName.trim();
+		userName = userName.trim();
+		signalingServerPassword = signalingServerPassword.trim();
+
 		if (!docName) {
 			return;
 		}
@@ -100,8 +105,7 @@
 		});
 
 		webrtc.awareness.on('change', () => {
-			people = Array.from(webrtc.awareness.getStates().values()) as User[];
-			console.log(webrtc.awareness.getStates());
+			people = new SvelteMap(webrtc?.awareness.getStates());
 		});
 
 		undoManager = new Y.UndoManager(doc);
@@ -126,7 +130,7 @@
 
 			if (movingTeam && viewTeamChecks.has(movingTeam)) {
 				movingTeam = undefined;
-				webrtc.awareness.setLocalStateField('movingTeam', movingTeam);
+				webrtc?.awareness.setLocalStateField('movingTeam', movingTeam);
 			}
 		});
 
@@ -149,7 +153,8 @@
 
 		doc.destroy();
 		idb.destroy();
-		webrtc.destroy();
+		webrtc?.awareness.destroy();
+		webrtc?.destroy();
 		undoManager?.destroy();
 
 		canUndo = false;
@@ -263,94 +268,120 @@
 </script>
 
 {#if alive}
-	<h1>
-		{userName} | {docName} | {signalingServerPassword}
-	</h1>
+	<div class="main">
+		<div class="left">
+			<p>
+				<button onclick={stop}>&LeftArrow; leave</button>
+			</p>
 
-	<p>people: {people.map((u) => u.name).join(', ')}</p>
+			<p>
+				<button onclick={clear}>clear</button>
+			</p>
 
-	<p>
-		<button onclick={stop}>stop</button>
-		<button onclick={clear}>clear and stop</button>
-		<button onclick={fill}>reset data</button>
-	</p>
+			<p>
+				<button onclick={fill}>&olarr; reset</button>
+			</p>
 
-	<p>
-		<button onclick={() => undoManager?.undo()} disabled={!canUndo}>undo</button>
-		<button onclick={() => undoManager?.redo()} disabled={!canRedo}>redo</button>
-	</p>
+			<p>list<br /><code>{docName}</code></p>
 
-	<div class="grid">
-		{#if activeTeams.length}
-			{@const movingIndex = activeTeams.find((r) => r.team == movingTeam)?.index}
+			{#if signalingServerPassword}
+				<p>lobby code<br /><code>{signalingServerPassword}</code></p>
+			{/if}
 
-			<div style="grid-column: span 5">Teams</div>
+			<p>
+				people
+				{#each people as [id, user]}
+					<br />
+					- {user.name}
+					{#if id == webrtc?.awareness.clientID}
+						(you)
+					{/if}
+				{/each}
+			</p>
+		</div>
 
-			{#each activeTeams as row, arrIndex (row.team)}
-				{@const thisMoving = movingTeam == row.team}
-				{@const otherMovingThis = people.some((u) => u.movingTeam == row.team)}
-				{@const bgColor = thisMoving ? 'darkgray' : 'lightgray'}
-				{@const color = otherMovingThis ? 'blue' : 'black'}
+		<div class="right">
+			<p>
+				<button onclick={() => undoManager?.undo()} disabled={!canUndo}>&larrhk; undo</button>
+				<button onclick={() => undoManager?.redo()} disabled={!canRedo}>&rarrhk; redo</button>
+			</p>
 
-				<div
-					animate:flip={{ duration: flipDurationMs }}
-					class="item"
-					style="background-color:{bgColor};color:{color}"
-				>
-					<input
-						type="checkbox"
-						disabled={!!movingTeam}
-						onchange={() => sharedTeamChecks.set(row.team, true)}
-					/>
-					<div>{row.rank}{getOrdinal(row.rank)}</div>
-					<div>{row.team}</div>
-					<button
-						onclick={() => {
-							if (!movingTeam) {
-								movingTeam = row.team;
-							} else if (thisMoving) {
-								movingTeam = undefined;
-							} else {
-								move(row.team);
-							}
-							webrtc.awareness.setLocalStateField('movingTeam', movingTeam);
-						}}
-						style="width:30px;height:24px"
-					>
-						{#if !movingTeam}
-							{#if arrIndex == 0}
-								&DownArrow;
-							{:else if arrIndex == activeTeams.length - 1}
-								&UpArrow;
-							{:else}
-								&UpDownArrow;
-							{/if}
-						{:else if thisMoving}
-							x
-						{:else if movingIndex && movingIndex > row.index}
-							&lsh;
-						{:else if movingIndex && movingIndex < row.index}
-							&ldsh;
-						{/if}
-					</button>
-					<div style="font-family:monospace">{row.index}</div>
-				</div>
-			{/each}
-		{/if}
+			<div class="grid">
+				{#if activeTeams.length}
+					{@const movingIndex = activeTeams.find((r) => r.team == movingTeam)?.index}
 
-		{#if crossedOffTeams.length}
-			<div style="grid-column: span 5">Crossed off</div>
+					<div style="grid-column: 1 / -1">Teams</div>
 
-			{#each crossedOffTeams as { rank, team, index } (team)}
-				<div class="item">
-					<input type="checkbox" checked onchange={() => sharedTeamChecks.delete(team)} />
-					<div>{rank}{getOrdinal(rank)}</div>
-					<div>{team}</div>
-					<div></div>
-					<div style="font-family:monospace">{index}</div>
-				</div>
-			{/each}
-		{/if}
+					{#each activeTeams as row, arrIndex (row.team)}
+						{@const thisMoving = movingTeam == row.team}
+						{@const otherMovingThis = people.values().some((u) => u.movingTeam == row.team)}
+						{@const bgColor = thisMoving ? 'darkgray' : 'lightgray'}
+						{@const color = otherMovingThis ? 'blue' : 'black'}
+
+						<div
+							animate:flip={{ duration: flipDurationMs }}
+							class="item"
+							style="background-color:{bgColor};color:{color}"
+						>
+							<input
+								type="checkbox"
+								disabled={!!movingTeam}
+								onchange={() => sharedTeamChecks.set(row.team, true)}
+							/>
+							<div>{row.rank}{getOrdinal(row.rank)}</div>
+							<div>{row.team}</div>
+
+							<button
+								disabled={activeTeams.length < 2}
+								onclick={() => {
+									if (!movingTeam) {
+										movingTeam = row.team;
+									} else if (thisMoving) {
+										movingTeam = undefined;
+									} else {
+										move(row.team);
+									}
+									webrtc?.awareness.setLocalStateField('movingTeam', movingTeam);
+								}}
+								style="width:30px;height:24px"
+							>
+								{#if !movingTeam}
+									{#if arrIndex == 0}
+										&DownArrow;
+									{:else if arrIndex == activeTeams.length - 1}
+										&UpArrow;
+									{:else}
+										&UpDownArrow;
+									{/if}
+								{:else if thisMoving}
+									x
+								{:else if movingIndex && movingIndex > row.index}
+									&lsh;
+								{:else if movingIndex && movingIndex < row.index}
+									&ldsh;
+								{/if}
+							</button>
+
+							<div style="font-family:monospace">{row.index}</div>
+						</div>
+					{/each}
+				{/if}
+
+				{#if crossedOffTeams.length}
+					<div style="grid-column: 1 / -1">Crossed off</div>
+
+					{#each crossedOffTeams as { rank, team, index } (team)}
+						<div class="item">
+							<input type="checkbox" checked onchange={() => sharedTeamChecks.delete(team)} />
+							<div>{rank}{getOrdinal(rank)}</div>
+							<div>{team}</div>
+							<div></div>
+							<div style="font-family:monospace">{index}</div>
+						</div>
+					{/each}
+				{/if}
+			</div>
+		</div>
 	</div>
 {:else}
 	<h1>yjs-stuff</h1>
@@ -363,7 +394,7 @@
 	</p>
 	<p>
 		<label>
-			doc name<br />
+			list<br />
 			<input bind:value={docName} />
 		</label>
 	</p>
@@ -379,9 +410,19 @@
 {/if}
 
 <style>
+	.main {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 1em;
+	}
+
+	.right {
+		flex-grow: 1;
+	}
+
 	.grid {
 		display: grid;
-		grid-template-columns: repeat(5, min-content);
+		grid-template-columns: repeat(5, min-content) auto;
 		align-items: center;
 		gap: 4px;
 	}
@@ -390,7 +431,8 @@
 		display: grid;
 		grid-template-columns: subgrid;
 		align-items: center;
-		grid-column: span 5;
+		grid-column: 1 / -1;
+		min-height: 30px;
 		padding: 2px;
 	}
 </style>
